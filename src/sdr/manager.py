@@ -5,7 +5,8 @@ Coordinates multiple agents to generate and send sales emails.
 """
 
 from typing import Optional
-from agents import Agent, Runner, trace
+from pydantic import BaseModel
+from agents import Agent, Runner, trace, input_guardrail, GuardrailFunctionOutput
 
 from sdr.agents import (
     ProfessionalSalesAgent,
@@ -15,6 +16,12 @@ from sdr.agents import (
 )
 from sdr.tools import ToolFactory
 from sdr.config import AgentConfig, EmailConfig
+
+
+class NameCheckOutput(BaseModel):
+    """Output model for name check guardrail."""
+    is_name_in_message: bool
+    name: str
 
 
 class SDRManager:
@@ -59,8 +66,45 @@ class SDRManager:
         # Initialize email manager agent
         self.email_manager = EmailManagerAgent(self.agent_config, email_tools)
         
+        # Create guardrail agent
+        self.guardrail_agent = self._create_guardrail_agent()
+        
         # Create sales manager agent
         self.sales_manager = self._create_sales_manager()
+    
+    def _create_guardrail_agent(self) -> Agent:
+        """
+        Create the guardrail agent for name checking.
+        
+        Returns:
+            Configured guardrail agent
+        """
+        return Agent(
+            name="Name check",
+            instructions="Check if the user is including someone's personal name in what they want you to do.",
+            output_type=NameCheckOutput,
+            model="gpt-4o-mini"
+        )
+    
+    @input_guardrail
+    async def guardrail_against_name(self, ctx, agent, message):
+        """
+        Guardrail function to check if a personal name is included in the message.
+        
+        Args:
+            ctx: Context object
+            agent: Agent instance
+            message: User message
+            
+        Returns:
+            GuardrailFunctionOutput indicating if name was found
+        """
+        result = await Runner.run(self.guardrail_agent, message, context=ctx.context)
+        is_name_in_message = result.final_output.is_name_in_message
+        return GuardrailFunctionOutput(
+            output_info={"found_name": result.final_output},
+            tripwire_triggered=is_name_in_message
+        )
     
     def _create_sales_manager(self) -> Agent:
         """
@@ -90,7 +134,8 @@ Crucial Rules:
             instructions=instructions,
             tools=self.sales_tools,
             handoffs=[self.email_manager.agent],
-            model=self.agent_config.model
+            model=self.agent_config.model,
+            input_guardrails=[self.guardrail_against_name]
         )
     
     async def send_sales_email(
@@ -148,7 +193,8 @@ Crucial Rules:
             name="Sales Manager",
             instructions=instructions,
             tools=self.sales_tools + [self.email_tool],
-            model=self.agent_config.model
+            model=self.agent_config.model,
+            input_guardrails=[self.guardrail_against_name]
         )
         
         with trace(trace_name):
